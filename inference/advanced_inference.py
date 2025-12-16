@@ -88,7 +88,8 @@ def _sample_stage_completion(
     kwargs = generation_kwargs.copy()
     kwargs.update({"stopping_criteria": stop_criteria})
 
-    inputs = processor(image, input_ids, return_tensors="pt").to(device)
+    #inputs = processor(image, input_ids, return_tensors="pt").to(device)
+    inputs = processor(image, accumulated_text, return_tensors="pt").to(device)
     output = model.generate(**inputs, **kwargs)
     new_generated_ids = output[0]
     generated_text = processor.tokenizer.decode(new_generated_ids[input_ids.shape[1] :], skip_special_tokens=True)

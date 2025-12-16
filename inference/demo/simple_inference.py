@@ -7,7 +7,7 @@ import numpy as np
 import copy
 import argparse
 from transformers import StoppingCriteria, StoppingCriteriaList, MllamaForConditionalGeneration, AutoProcessor
-
+from transformers import AutoModelForVision2Seq, AutoProcessor
 # Ensure advanced_inference is importable when running as a script
 try:
     from inference.advanced_inference import generate_mcts, api_stage_gen, api_judge
@@ -18,6 +18,7 @@ except ImportError:
 parser = argparse.ArgumentParser(description="LLaVA-CoT Simple Inference")
 parser.add_argument(
     "--model_name_or_path",
+    "-m",
     type=str,
     default=None,
     help="Path to the model.",
@@ -76,7 +77,20 @@ class StopOnPeriod(StoppingCriteria):
         return False
 
 model_name_or_path = args.model_name_or_path
-if model_name_or_path:
+if model_name_or_path == None:
+    model = None
+    processor = None
+elif model_name_or_path == "test":
+    model_name_or_path = "./models"
+
+    model = AutoModelForVision2Seq.from_pretrained(
+        model_name_or_path,
+        device_map="cpu",
+    ).eval()
+
+    processor = AutoProcessor.from_pretrained(model_name_or_path)
+    device = args.device
+else:
     model = MllamaForConditionalGeneration.from_pretrained(
             model_name_or_path,
             torch_dtype=torch.bfloat16,
@@ -308,74 +322,110 @@ def generate_inner_sentence_beam(prompt, image_path, beam_size=2):
     final_output = processor.tokenizer.decode(input_ids[0][initial_length:], skip_special_tokens=True)
     return final_output
 
-def generate_inner_stage_beam(prompt, image_path, beam_size=2):
+def generate_inner_stage_beam(prompt, image_path, beam_size=2, log_path="./temp/stage_beam_log.txt"):
 
     image = Image.open(image_path)
-    messages = [
-        {'role': 'user', 'content': [
-            {'type': 'image'},
-            {'type': 'text', 'text': prompt}
-        ]}
-    ]
-    input_text = processor.apply_chat_template(messages, add_generation_prompt=True)
-    inputs = processor(image, input_text, return_tensors='pt').to(device)
-    
+    use_api = model is None or processor is None
+    judge_fn = api_judge if use_api else judge
+    stage_generator = api_stage_gen if use_api else None
+
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    log_file = open(log_path, "w", encoding="utf-8")
+
+    def log(msg: str):
+        print(msg)
+        log_file.write(msg + "\n")
+
+    if not use_api:
+        messages = [
+            {'role': 'user', 'content': [
+                {'type': 'image'},
+                {'type': 'text', 'text': prompt}
+            ]}
+        ]
+        input_text = processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = processor(image, input_text, return_tensors='pt').to(device)
+        initial_length = len(inputs['input_ids'][0])
+        input_ids = copy.deepcopy(inputs['input_ids'])
+        current_text = processor.tokenizer.decode(input_ids[0][initial_length:], skip_special_tokens=True)
+    else:
+        initial_length = 0
+        input_ids = None
+        current_text = ""
+
     stages = ['<SUMMARY>', '<CAPTION>', '<REASONING>', '<CONCLUSION>']
     end_markers = ['</SUMMARY>', '</CAPTION>', '</REASONING>', '</CONCLUSION>']
 
-    initial_length = len(inputs['input_ids'][0])
-    input_ids = copy.deepcopy(inputs['input_ids'])
-
     for stage, end_marker in zip(stages, end_markers):
-        stop_criteria = StoppingCriteriaList([StopOnStrings([end_marker], processor.tokenizer)])
+        stop_criteria = None if use_api else StoppingCriteriaList([StopOnStrings([end_marker], processor.tokenizer)])
         
         candidates = []
-        for _ in range(beam_size):  
-            generation_kwargs = kwargs.copy()
-            generation_kwargs.update({
-                'stopping_criteria': stop_criteria
-            })
-            
-            inputs = processor(image, input_ids, return_tensors='pt').to(device)
-            output = model.generate(**inputs, **generation_kwargs)
-            
-            new_generated_ids = output[0]
-            
-            generated_text = processor.tokenizer.decode(new_generated_ids[initial_length:], skip_special_tokens=True)
-            
-            candidates.append({
-                'input_ids': new_generated_ids.unsqueeze(0),
-                'generated_text': generated_text,
-            })
+        for idx in range(beam_size):
+            if stage_generator is not None:
+                stage_text = stage_generator(
+                    prompt, image_path, current_text, stage, end_marker, kwargs, logger=log
+                )
+                full_text = current_text + stage_text
+                candidates.append({
+                    'input_ids': None,
+                    'generated_text': full_text,
+                })
+            else:
+                generation_kwargs = kwargs.copy()
+                generation_kwargs.update({
+                    'stopping_criteria': stop_criteria
+                })
+                
+                inputs = processor(image, input_ids, return_tensors='pt').to(device)
+                output = model.generate(**inputs, **generation_kwargs)
+                
+                new_generated_ids = output[0]
+                
+                generated_text = processor.tokenizer.decode(new_generated_ids[initial_length:], skip_special_tokens=True)
+                
+                candidates.append({
+                    'input_ids': new_generated_ids.unsqueeze(0),
+                    'generated_text': generated_text,
+                })
+            log(f"[{stage}] candidate {idx+1}: {candidates[-1]['generated_text']}")
         
         while(len(candidates) > 1):
             # randomly select two candidates
             candidate1 = candidates.pop(np.random.randint(len(candidates)))
             candidate2 = candidates.pop(np.random.randint(len(candidates)))
             outputs = [candidate1['generated_text'], candidate2['generated_text']]
-            best_index = judge(image, prompt, outputs, type=stage[1:-1].lower())
+            if stage_generator is not None:
+                best_index = judge_fn(image, prompt, outputs, type=stage[1:-1].lower(), generation_kwargs=kwargs, logger=log)
+            else:
+                best_index = judge_fn(image, prompt, outputs, type=stage[1:-1].lower())
             if best_index == 0:
                 candidates.append(candidate1)
             else:
                 candidates.append(candidate2)
         
         input_ids = candidates[0]['input_ids']
+        current_text = candidates[0]['generated_text']
+        log(f"[{stage}] selected candidate: {current_text}")
 
-    final_output = processor.tokenizer.decode(input_ids[0][initial_length:], skip_special_tokens=True)
+    log_file.close()
+    if input_ids is not None:
+        final_output = processor.tokenizer.decode(input_ids[0][initial_length:], skip_special_tokens=True)
+    else:
+        final_output = current_text
     return final_output
 
-def generate_inner(prompt, image_path, type="stage", beam_size=2):
+def generate_inner(prompt, image_path, type="stage", beam_size=2, log_path="./temp/stage_beam_log.txt"):
     if type == "best_of_N":
         return generate_inner_best_of_N(prompt, image_path, beam_size)
     elif type == "sentence":
         return generate_inner_sentence_beam(prompt, image_path, beam_size)
     elif type == "stage":
-        return generate_inner_stage_beam(prompt, image_path, beam_size)
+        return generate_inner_stage_beam(prompt, image_path, beam_size, log_path=log_path)
     else:
         raise ValueError("Invalid type. Choose from 'best_of_N', 'sentence', or 'stage'.")
 
 #print(generate_inner(args.prompt, args.image_path, type=args.type, beam_size=args.beam_size))
 if args.type == "mcts":
-    print(generate_mcts(args.prompt, args.image_path, judge=api_judge, beam_size=args.beam_size, simulations=12, debug=True, log_path="./temp/log.txt", stage_generator=api_stage_gen))
+    print(generate_mcts(args.prompt, args.image_path, model=model, processor=processor, judge=api_judge if not model else judge, beam_size=args.beam_size, simulations=12, debug=True, log_path="./temp/log.txt", stage_generator=api_stage_gen if not model else None))
 elif args.type == "stage":
     print(generate_inner(args.prompt, args.image_path, type=args.type, beam_size=args.beam_size))
