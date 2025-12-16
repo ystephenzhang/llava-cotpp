@@ -1,3 +1,5 @@
+import os
+import sys
 import torch
 from PIL import Image
 import re
@@ -6,11 +8,18 @@ import copy
 import argparse
 from transformers import StoppingCriteria, StoppingCriteriaList, MllamaForConditionalGeneration, AutoProcessor
 
+# Ensure advanced_inference is importable when running as a script
+try:
+    from inference.advanced_inference import generate_mcts, api_stage_gen, api_judge
+except ImportError:
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from advanced_inference import generate_mcts, api_stage_gen, api_judge
+
 parser = argparse.ArgumentParser(description="LLaVA-CoT Simple Inference")
 parser.add_argument(
     "--model_name_or_path",
     type=str,
-    default="Xkev/Llama-3.2V-11B-cot",
+    default=None,
     help="Path to the model.",
 )
 parser.add_argument(
@@ -27,7 +36,7 @@ parser.add_argument(
     "--type",
     type=str,
     default="stage",
-    choices=["best_of_N", "sentence", "stage"],
+    choices=["best_of_N", "sentence", "stage", "mcts"],
     help="Type of generation to perform.",
 )
 parser.add_argument(
@@ -67,13 +76,14 @@ class StopOnPeriod(StoppingCriteria):
         return False
 
 model_name_or_path = args.model_name_or_path
-model = MllamaForConditionalGeneration.from_pretrained(
-        model_name_or_path,
-        torch_dtype=torch.bfloat16,
-        device_map='cpu',
-    ).cuda().eval()
-device = args.device
-processor = AutoProcessor.from_pretrained(model_name_or_path)
+if model_name_or_path:
+    model = MllamaForConditionalGeneration.from_pretrained(
+            model_name_or_path,
+            torch_dtype=torch.bfloat16,
+            device_map='cpu',
+        ).cuda().eval()
+    device = args.device
+    processor = AutoProcessor.from_pretrained(model_name_or_path)
 kwargs = dict(do_sample=True, max_new_tokens=2048, temperature=0.6, top_p=0.9)
 
 def judge(image, prompt, outputs, type="summary"):
@@ -364,4 +374,8 @@ def generate_inner(prompt, image_path, type="stage", beam_size=2):
     else:
         raise ValueError("Invalid type. Choose from 'best_of_N', 'sentence', or 'stage'.")
 
-print(generate_inner(args.prompt, args.image_path, type=args.type, beam_size=args.beam_size))
+#print(generate_inner(args.prompt, args.image_path, type=args.type, beam_size=args.beam_size))
+if args.type == "mcts":
+    print(generate_mcts(args.prompt, args.image_path, judge=api_judge, beam_size=args.beam_size, simulations=12, debug=True, log_path="./temp/log.txt", stage_generator=api_stage_gen))
+elif args.type == "stage":
+    print(generate_inner(args.prompt, args.image_path, type=args.type, beam_size=args.beam_size))
