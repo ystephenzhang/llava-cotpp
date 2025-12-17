@@ -206,10 +206,17 @@ def generate_mcts(
             return None, 0.0
         idxs = list(range(len(children)))
         stage_type = stages[stage_idx][1:-1].lower()  # e.g., "summary"
+
+        def child_text(node: Node) -> str:
+            # Provide full accumulated text (all prior stages + this stage) to the judge.
+            if node.input_ids is not None and processor is not None:
+                return node.full_text(initial_length, processor.tokenizer)
+            return "".join(node.text_segments)
+
         while len(idxs) > 1:
             i1 = idxs.pop(random.randrange(len(idxs)))
             i2 = idxs.pop(random.randrange(len(idxs)))
-            outputs = [children[i1].action_text, children[i2].action_text]
+            outputs = [child_text(children[i1]), child_text(children[i2])]
             best_index = judge(image, prompt, outputs, type=stage_type)
             winner = i1 if best_index == 0 else i2
             log(f"[judge] stage={stage_type} winner={winner}")
