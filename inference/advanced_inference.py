@@ -2,7 +2,7 @@ import copy
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from PIL import Image
@@ -103,7 +103,7 @@ def generate_mcts(
     processor=None,
     judge: Callable[[Image.Image, str, List[str], str], int] = None,
     generation_kwargs: Optional[Dict] = None,
-    beam_size: int = 3,
+    beam_size: Union[int, Dict[str, int]] = 3,
     simulations: int = 5,
     exploration: float = 1.4,
     device: str = "cuda",
@@ -115,7 +115,9 @@ def generate_mcts(
     Run MCTS over stage-wise generation.
 
     - Each node is a partial completion up to a stage boundary.
-    - Expansion samples multiple candidates for the next stage segment.
+    - Expansion samples multiple candidates for the next stage segment. `beam_size` can be
+      an int (same for all stages) or a dict keyed by stage name (summary, caption,
+      reasoning, conclusion) to vary candidates per stage.
     - Judge returns an index of the better candidate; value is 1 for winner, 0 otherwise.
     - Backprop uses average value; selection uses UCT.
     - Optional stage_generator lets you plug in an API model for stage completions:
@@ -162,6 +164,13 @@ def generate_mcts(
             current = max(current.children, key=lambda c: c.uct_score(exploration))
         return current
 
+    def _resolve_beam_size(stage_tag: str) -> int:
+        """Return the beam size for the given stage tag."""
+        if isinstance(beam_size, int):
+            return beam_size
+        key = stage_tag.strip("<>").lower()
+        return beam_size.get(key, beam_size.get("default", 3))
+
     def expand(node: Node) -> List[Node]:
         """Generate beam_size children for the next stage."""
         if node.is_terminal:
@@ -170,9 +179,10 @@ def generate_mcts(
         stage_tag = stages[stage_idx]
         end_marker = end_markers[stage_idx]
         accumulated_text = "".join(node.text_segments)
+        stage_beam = _resolve_beam_size(stage_tag)
 
         children = []
-        for _ in range(beam_size):
+        for _ in range(stage_beam):
             new_input_ids, generated_text = _sample_stage_completion(
                 model,
                 processor,
@@ -196,7 +206,7 @@ def generate_mcts(
                 action_text=generated_text,
             )
             children.append(child)
-        log(f"[expand] stage={stage_tag} children={len(children)}")
+        log(f"[expand] stage={stage_tag} children={len(children)} beam_size={stage_beam}")
         node.children = children
         return children
 
