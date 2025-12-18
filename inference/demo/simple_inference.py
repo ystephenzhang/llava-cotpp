@@ -128,29 +128,30 @@ def judge(image, prompt, outputs, type="summary"):
         judge_prompt = f'Now you act as a judge, helping me determine which of the two texts I provide better summarizes the information in the image related to the question, and has fewer errors. It is essential that the captions are as thorough as possible while remaining accurate, capturing as many details as possible rather than providing only general commentary.'
         recall_prompt = f'Please note that a better caption should be as thorough as possible while remaining accurate, capturing as many details as possible rather than providing only general commentary.'
         for output in outputs:
-            input_match = re.search(r'<CAPTION>(.*?)</CAPTION>', output, re.DOTALL)
+            input_outputs.append(input_match.group(1))
             if input_match:
-                hint_match = re.search(r'<SUMMARY>(.*?)</SUMMARY>', output, re.DOTALL)
-                if hint_match:
-                    input_outputs.append(input_match.group(1))
+                input_match = re.search(r'<CAPTION>(.*?)</CAPTION>', output, re.DOTALL)
+                #hint_match = re.search(r'<SUMMARY>(.*?)</SUMMARY>', output, re.DOTALL)
+                #if hint_match:
     elif type == "reasoning":
         judge_prompt = f'Now you act as a judge, helping me determine which of the two texts I provide better explains the reasoning process to solve the question, and has fewer errors. Begin by thoroughly reviewing the question, followed by an in-depth examination of each answer individually, noting any differences. Subsequently, analyze these differences to determine which response demonstrates stronger reasoning and provide a clear conclusion.'
         recall_prompt = f'Begin by thoroughly reviewing the question, followed by an in-depth examination of each answer individually, noting any differences. Subsequently, analyze these differences to determine which response demonstrates stronger reasoning and provide a clear conclusion.'
         for output in outputs:
             input_match = re.search(r'<REASONING>(.*?)</REASONING>', output, re.DOTALL)
             if input_match:
+                input_outputs.append(input_match.group(1))
                 hint_match = re.search(r'<SUMMARY>(.*?)</SUMMARY>', output, re.DOTALL)
                 if hint_match:
                     hint_caption_match = re.search(r'<CAPTION>(.*?)</CAPTION>', output, re.DOTALL)
                     if hint_caption_match:
                         hint = hint_caption_match.group(1)
-                        input_outputs.append(input_match.group(1))
     elif type == "conclusion":
         judge_prompt = f'Now you act as a judge, helping me determine which of the two texts I provide offers a more effective conclusion to the question. The conclusion should align with the reasoning presented in the hint. The conclusion should never refuse to answer the question.'
         recall_prompt = f'Please note that a better conclusion should align with the reasoning presented in the hint. The conclusion should never refuse to answer the question.'
         for output in outputs:
             input_match = re.search(r'<CONCLUSION>(.*?)</CONCLUSION>', output, re.DOTALL)
             if input_match:
+                input_outputs.append(input_match.group(1))
                 hint_match = re.search(r'<SUMMARY>(.*?)</SUMMARY>', output, re.DOTALL)
                 if hint_match:
                     hint_caption_match = re.search(r'<CAPTION>(.*?)</CAPTION>', output, re.DOTALL)
@@ -158,8 +159,8 @@ def judge(image, prompt, outputs, type="summary"):
                         hint_reasoning_match = re.search(r'<REASONING>(.*?)</REASONING>', output, re.DOTALL)
                         if hint_reasoning_match:
                             hint = hint_caption_match.group(1) + hint_reasoning_match.group(1)
-                            input_outputs.append(input_match.group(1))
-
+    if len(input_outputs) < 2:
+        input_outputs = outputs
     if type == "reasoning":
         reasoning_prompt = f"""Now you act as a judge, helping me determine whether the reasoning process in the given text is correct and accurate based on the given information.
         You should assume that the given information about the image is correct.
