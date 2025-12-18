@@ -1,8 +1,10 @@
 import torch
 from PIL import Image
+import os
 import os.path as osp
 import sys
 from .base import BaseModel
+from ..advanced_inference import generate_mcts
 from ..smp import *
 from ..dataset import DATASET_TYPE
 import re
@@ -519,12 +521,51 @@ class llama_vision(BaseModel):
 
         final_output = self.processor.tokenizer.decode(input_ids[0][initial_length:], skip_special_tokens=True)
         return final_output
+
+    def generate_inner_mcts(
+        self,
+        message,
+        dataset=None,
+        beam_size: int = 3,
+        simulations: int = 12,
+        exploration: float = 1.4,
+        debug: bool = False,
+        log_path: str = "./temp/mcts_log.txt",
+    ):
+        prompt, image_path = self.message_to_promptimg(message, dataset=dataset)
+        if not self.use_custom_prompt(dataset):
+            if DATASET_TYPE(dataset) == 'MCQ' or DATASET_TYPE(dataset) == 'Y/N':
+                self.kwargs['max_new_tokens'] = 2048
+            else:
+                self.kwargs['max_new_tokens'] = 2048
+
+        generation_kwargs = self.kwargs.copy()
+        log_dir = osp.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
+        return generate_mcts(
+            prompt,
+            image_path,
+            model=self.model,
+            processor=self.processor,
+            judge=self.judge,
+            generation_kwargs=generation_kwargs,
+            beam_size=beam_size,
+            simulations=simulations,
+            exploration=exploration,
+            device=self.device,
+            debug=debug,
+            log_path=log_path,
+        )
     
-    def generate_inner(self, message, dataset=None):
-        type = "beam"
+    def generate_inner(self, message, dataset=None, gen_type: str = "stage"):
+        type = gen_type
         if type == "all":
             return self.generate_inner_best_of_N(message, dataset)
         elif type == "sentence":
             return self.generate_inner_sentence_beam(message, dataset)
+        elif type == "mcts":
+            return self.generate_inner_mcts(message, dataset)
         else:
             return self.generate_inner_stage_beam(message, dataset)
