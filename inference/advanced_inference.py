@@ -210,12 +210,12 @@ def generate_mcts(
         node.children = children
         return children
 
-    def evaluate_children(children: List[Node], stage_idx: int) -> Tuple[Node, float]:
-        """Use judge to pick the best child; return (winner, value)."""
+    def evaluate_children(children: List[Node], stage_idx: int) -> Tuple[Optional[Node], float, Optional[Node]]:
+        """Rollout children to terminal and use judge at the last stage; return (winner, value, winner_terminal)."""
         if not children:
-            return None, 0.0
+            return None, 0.0, None
         idxs = list(range(len(children)))
-        stage_type = stages[stage_idx][1:-1].lower()  # e.g., "summary"
+        stage_type = stages[-1][1:-1].lower()  # judge on the final stage
 
         def child_text(node: Node) -> str:
             # Provide full accumulated text (all prior stages + this stage) to the judge.
@@ -223,21 +223,53 @@ def generate_mcts(
                 return node.full_text(initial_length, processor.tokenizer)
             return "".join(node.text_segments)
 
+        def rollout_to_terminal(node: Node) -> Node:
+            current = node
+            while not current.is_terminal:
+                rollout_stage_idx = current.stage_index
+                stage_tag = stages[rollout_stage_idx]
+                end_marker = end_markers[rollout_stage_idx]
+                accumulated_text = "".join(current.text_segments)
+                new_input_ids, generated_text = _sample_stage_completion(
+                    model,
+                    processor,
+                    image,
+                    current.input_ids,
+                    end_marker,
+                    generation_kwargs,
+                    device,
+                    stage_generator,
+                    prompt,
+                    image_path,
+                    accumulated_text,
+                    stage_tag,
+                    log,
+                )
+                current = Node(
+                    input_ids=new_input_ids,
+                    stage_index=rollout_stage_idx + 1,
+                    text_segments=current.text_segments + [generated_text],
+                )
+            return current
+
+        rollout_nodes = [rollout_to_terminal(child) for child in children]
+
         while len(idxs) > 1:
             i1 = idxs.pop(random.randrange(len(idxs)))
             i2 = idxs.pop(random.randrange(len(idxs)))
-            outputs = [child_text(children[i1]), child_text(children[i2])]
+            outputs = [child_text(rollout_nodes[i1]), child_text(rollout_nodes[i2])]
             best_index = judge(image, prompt, outputs, type=stage_type)
             winner = i1 if best_index == 0 else i2
             log(f"[judge] stage={stage_type} winner={winner}")
             idxs.append(winner)
         winner_node = children[idxs[0]]
+        winner_terminal = rollout_nodes[idxs[0]]
         # Winner gets value 1, others 0 to shape backprop
         for child in children:
             child_value = 1.0 if child is winner_node else 0.0
             child.visits += 1
             child.value_sum += child_value
-        return winner_node, 1.0
+        return winner_node, 1.0, winner_terminal
 
     def backprop(node: Node, value: float):
         """Propagate value up to root."""
@@ -261,15 +293,15 @@ def generate_mcts(
             continue
 
         children = expand(leaf)
-        winner_child, value = evaluate_children(children, leaf.stage_index)
+        winner_child, value, winner_terminal = evaluate_children(children, leaf.stage_index)
         if winner_child is None:
             continue
         backprop(winner_child, value)
-        if winner_child.is_terminal:
-            leaf_mean = winner_child.value_sum / winner_child.visits
-            if leaf_mean > best_terminal_value:
-                best_terminal_value = leaf_mean
-                best_terminal_node = winner_child
+        if winner_terminal is not None:
+            # Rollout already reaches terminal; keep the judged winner as best.
+            if best_terminal_node is None or value > best_terminal_value:
+                best_terminal_value = value
+                best_terminal_node = winner_terminal
         log(f"[sim] finished one simulation; best_terminal_value={best_terminal_value}")
 
     # Fallback: pick the most visited child of root if no terminal found

@@ -426,7 +426,13 @@ def generate_inner(prompt, image_path, type="stage", beam_size=2, log_path="./te
         raise ValueError("Invalid type. Choose from 'best_of_N', 'sentence', or 'stage'.")
 
 #print(generate_inner(args.prompt, args.image_path, type=args.type, beam_size=args.beam_size))
+beam_size = {
+    "SUMMARY": 2,
+    "CAPTION": 2,
+    "REASONING": 4,
+    "CONCLUSION": 2
+}
 if args.type == "mcts":
-    print(generate_mcts(args.prompt, args.image_path, model=model, processor=processor, judge=api_judge if not model else judge, beam_size=args.beam_size, simulations=12, debug=True, log_path="./temp/log.txt", stage_generator=api_stage_gen if not model else None))
+    print(generate_mcts(args.prompt, args.image_path, model=model, processor=processor, judge=api_judge if not model else judge, beam_size=beam_size, simulations=32, debug=True, log_path="./temp/log.txt", stage_generator=api_stage_gen if not model else None))
 elif args.type == "stage":
     print(generate_inner(args.prompt, args.image_path, type=args.type, beam_size=args.beam_size))
